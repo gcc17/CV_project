@@ -1,5 +1,3 @@
-import argparse
-import logging
 import os
 
 import numpy as np
@@ -9,8 +7,8 @@ from torchvision import transforms
 import torch.nn.functional as F
 
 from unet import UNet
-from utils.data_vis import plot_img_and_mask
 from utils.dataset import BasicDataset
+import glob
 
 import ipdb
 
@@ -67,12 +65,11 @@ def predict_img(net,
                 full_img,
                 device,
                 aswhole=0,
-                scale_factor=1,
-                crop_w=256, crop_h=256, stride=1):
+                crop_w=256, crop_h=256, stride=50):
     net.eval()
     # print(full_img.size)
 
-    img = torch.from_numpy(BasicDataset.preprocess(full_img, scale_factor))
+    img = torch.from_numpy(BasicDataset.preprocess(full_img, 1))
     img = img.unsqueeze(0)
 
     img = img.to(device=device, dtype=torch.float32)
@@ -86,7 +83,7 @@ def predict_img(net,
             output, output_binary = net(img)
         else:
             output, output_binary = get_pred(net, img, device, crop_w,
-                                             crop_h, stride=50)
+                                             crop_h, stride=stride)
 
         if net.n_classes > 1:
             probs = F.softmax(output, dim=1)
@@ -104,92 +101,21 @@ def predict_img(net,
         tf = transforms.Compose(
             [
                 transforms.ToPILImage(),
-                transforms.Resize(img_w, img_h),
+                transforms.Resize((img_w, img_h)),
                 transforms.ToTensor()
             ]
         )
 
         probs = tf(probs.cpu())
         probs_binary = tf(probs_binary.cpu())
-        # print(probs.shape, probs_binary.shape)
+        print(probs.shape, probs_binary.shape)
 
-        area_probs = torch.zeros(probs.shape)
-        area_probs[1:, :, :] = probs[1:, :, :]
-        max_area_idx = torch.argmax(area_probs[1:, :, :], dim=0)
-        binary_idx = torch.argmax(probs_binary, dim=0)
-
-        # ipdb.set_trace()
-        max_area_idx = max_area_idx * binary_idx
-
-    return probs.cpu().numpy(), probs_binary.cpu().numpy(), max_area_idx.cpu().numpy()
+    return probs, probs_binary
 
 
-def get_args():
-    parser = argparse.ArgumentParser(
-        description='Predict masks from input images',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--model', '-m', default='MODEL.pth',
-                        metavar='FILE',
-                        help="Specify the file in which the model is stored")
-    parser.add_argument('--input', '-i', metavar='INPUT', nargs='+',
-                        help='filenames of input images', required=True)
-
-    parser.add_argument('--output', '-o', metavar='INPUT', nargs='+',
-                        help='Filenames of ouput images')
-    parser.add_argument('--viz', '-v', action='store_true',
-                        help="Visualize the images as they are processed",
-                        default=False)
-    parser.add_argument('--no-save', '-n', action='store_true',
-                        help="Do not save the output masks",
-                        default=False)
-    parser.add_argument('--mask-threshold', '-t', type=float,
-                        help="Minimum probability value to consider a mask pixel white",
-                        default=0.5)
-    parser.add_argument('--scale', '-s', type=float,
-                        help="Scale factor for the input images",
-                        default=1)
-
-    return parser.parse_args()
-
-
-def get_output_filenames(args):
-    in_files = args.input
-    out_files = []
-
-    if not args.output:
-        for f in in_files:
-            pathsplit = os.path.splitext(f)
-            out_files.append("{}_OUT{}".format(pathsplit[0], pathsplit[1]))
-    elif len(in_files) != len(args.output):
-        logging.error("Input files and output files are not of the same length")
-        raise SystemExit()
-    else:
-        out_files = args.output
-
-    return out_files
-
-
-def mask_to_image(mask):
-    return Image.fromarray((mask * 255).astype(np.uint8))
-
-
-if __name__ == "__main__":
-    args = get_args()
-    in_files = args.input
-    out_files = get_output_filenames(args)
-
-    net = UNet(n_channels=3, n_classes=4)
-
-    logging.info("Loading model {}".format(args.model))
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f'Using device {device}')
-    net.to(device=device)
-    net.load_state_dict(torch.load(args.model, map_location=device))
-
-    logging.info("Model loaded !")
-
-    out_dir = "./result"
+def save_result(fname, probs, probs_binary, device, out_dir="../result"):
+    print("binary sum", probs_binary.sum())
+    print("probs sum", probs.sum())
     if not os.path.isdir(out_dir):
         os.mkdir(out_dir)
     masks = os.path.join(out_dir, "masks")
@@ -198,34 +124,99 @@ if __name__ == "__main__":
     masks_binary = os.path.join(out_dir, "masks_binary")
     if not os.path.isdir(masks_binary):
         os.mkdir(masks_binary)
-    corrected = os.path.join(out_dir, "corrected")
-    if not os.path.isdir(corrected):
-        os.mkdir(corrected)
+    corrected_index = os.path.join(out_dir, "corrected_index")
+    if not os.path.isdir(corrected_index):
+        os.mkdir(corrected_index)
+    images = os.path.join(out_dir, "images")
+    if not os.path.isdir(images):
+        os.mkdir(images)
+    images_binary = os.path.join(out_dir, "images_binary")
+    if not os.path.isdir(images_binary):
+        os.mkdir(images_binary)
+    corrected_images = os.path.join(out_dir, "corrected_images")
+    if not os.path.isdir(corrected_images):
+        os.mkdir(corrected_images)
 
-    for i, fn in enumerate(in_files):
-        logging.info("\nPredicting image {} ...".format(fn))
+    np.save('{}.npy'.format(os.path.join(masks, fname)), probs.cpu().numpy())
+    np.save('{}.npy'.format(os.path.join(masks_binary, fname)),
+            probs_binary.cpu().numpy())
 
-        img = Image.open(fn)
+    area_probs = torch.zeros(probs.shape).to(device=device, dtype=torch.float32)
+    area_probs[1:, :, :] = probs[1:, :, :]
+    max_area_idx = torch.argmax(area_probs, dim=0).to(device=device, dtype=torch.float32)
+    binary_idx = torch.argmax(probs_binary, dim=0).to(device=device, dtype=torch.float32)
 
-        probs, probs_binary, max_area_idx = predict_img(net=net,
-                                                        full_img=img,
-                                                        scale_factor=args.scale,
-                                                        device=device,
-                                                        aswhole=0)
+    max_area_idx = max_area_idx * binary_idx
+    max_area_idx = max_area_idx.cpu().numpy()
+    np.save('{}.npy'.format(os.path.join(corrected_index, fname)), max_area_idx)
+    print("max area idx sum", max_area_idx.sum())
+    print("binary idx sum", binary_idx.sum())
 
-        if not args.no_save:
-            out_fn = out_files[i]
-            probs_name = os.path.join(masks, out_fn)
-            np.save('{}.npy'.format(probs_name), probs)
-            probs_binary_name = os.path.join(masks_binary, out_fn)
-            np.save('{}.npy'.format(probs_binary_name), probs_binary)
-            idx_name = os.path.join(corrected, out_fn)
-            np.save('{}.npy'.format(idx_name), max_area_idx)
+    w = probs.shape[1]
+    h = probs.shape[2]
+    idx = torch.argmax(probs, dim=0)
+    print("idx sum", idx.sum())
 
-            logging.info("Mask saved to {}".format(out_files[i]))
+    image = np.zeros((w, h, 3))
+    corrected_image = np.zeros((w, h, 3))
+    image_binary = np.zeros((w, h, 3))
+    print("convert image")
+    ycnt = 0
+    bcnt = 0
+    rcnt = 0
+    for i in range(w):
+        for j in range(h):
+            if idx[i, j] == 1:
+                image[i, j, 0] = image[i, j, 1] = 255
+                ycnt += 1
+            elif idx[i, j] == 2:
+                image[i, j, 2] = 255
+                bcnt += 1
+            elif idx[i, j] == 3:
+                image[i, j, 0] = 255
+                rcnt += 1
+            if max_area_idx[i, j] == 1:
+                corrected_image[i, j, 0] = corrected_image[i, j, 1] = 255
+            elif max_area_idx[i, j] == 2:
+                corrected_image[i, j, 2] = 255
+            elif max_area_idx[i, j] == 3:
+                corrected_image[i, j, 0] = 255
 
-        if args.viz:
-            logging.info(
-                "Visualizing results for image {}, close to continue ...".format(
-                    fn))
-            # plot_img_and_mask(img, mask)
+    print(ycnt, bcnt, rcnt)
+    image = Image.fromarray(image.astype('uint8')).convert('RGB')
+    image.save('{}.jpg'.format(os.path.join(images, fname)),
+               quality=100)
+    corrected_image = Image.fromarray(corrected_image.astype('uint8')).convert(
+        'RGB')
+    corrected_image.save('{}.jpg'.format(os.path.join(corrected_images, fname)),
+                         quality=100)
+
+    for i in range(3):
+        image_binary[:, :, i] = binary_idx.cpu().numpy()
+    image_binary *= 255
+    image_binary = Image.fromarray(image_binary.astype('uint8')).convert('RGB')
+    image_binary.save('{}.jpg'.format(os.path.join(images_binary, fname)),
+                      quality=100)
+
+
+def batch_predict(model, input_dir, crop_w=256, crop_h=256, stride=50,
+                  aswhole=0):
+    net = UNet(n_channels=3, n_classes=4)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net.to(device=device)
+    net.load_state_dict(torch.load(model, map_location=device))
+
+    paths = glob.glob(os.path.join(input_dir, '*.JPG'))
+    print(len(paths))
+    for path in paths:
+        img = Image.open(path)
+        fname = os.path.splitext(os.path.split(path)[1])[0]
+        probs, probs_binary = predict_img(net,
+                                          img,
+                                          device,
+                                          aswhole,
+                                          crop_w, crop_h, stride)
+        save_result(fname, probs, probs_binary, device)
+
+
+batch_predict("../models/CP_epoch1991_addbinary.pth", "../data/imgs")
